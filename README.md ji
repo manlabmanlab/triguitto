@@ -9,4 +9,14 @@ def pri(n):
     for j in range(i*i,n+1,i):
       no_primos.append(j)
   return primos
-
+def pri_gen(n):
+  numero=2
+  yield número
+  while True:
+    temp = número
+      while True:
+        temp +=1
+        Cant_num=1
+        num_div+=1
+        while can_num<=temp:
+          
