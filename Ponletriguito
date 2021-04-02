@@ -1,0 +1,403 @@
+Skip to content
+Sign up
+lensapp
+/
+lens
+Code
+Issues
+431
+Pull requests
+64
+Actions
+Projects
+Security
+Insights
+Jump to bottom
+Release v4.2.0 #2431
+ Closed
+Nokel81 wants to merge 50 commits into release/v4.2 from release/v4.2.0
+Conversation 0
+Commits 50
+Checks 4
+Files changed 11
+ 9  SECURITY.md 
+@@ -0,0 +1,9 @@
+# Security Policy
+
+## Reporting a Vulnerability
+
+Team Lens encourages users who become aware of a security vulnerability in Lens to contact Team Lens with details of the vulnerability. Team Lens has established an email address that should be used for reporting a vulnerability. Please send descriptions of any vulnerabilities found to security@k8slens.dev. Please include details on the software and hardware configuration of your system so that we can duplicate the issue being reported.
+
+Team Lens hopes that users encountering a new vulnerability will contact us privately as it is in the best interests of our users that Team Lens has an opportunity to investigate and confirm a suspected vulnerability before it becomes public knowledge.
+
+In the case of vulnerabilities found in third-party software components used in Lens, please also notify Team Lens as described above.
+  2  package.json 
+@@ -2,7 +2,7 @@
+  "name": "kontena-lens",
+  "productName": "Lens",
+  "description": "Lens - The Kubernetes IDE",
+  "version": "4.2.0-rc.2",
+  "version": "4.2.0",
+  "main": "static/build/main.js",
+  "copyright": "© 2021, Mirantis, Inc.",
+  "license": "MIT",
+ 40  src/main/__test__/router.test.ts 
+@@ -0,0 +1,40 @@
+import { Router } from "../router";
+
+const staticRoot = __dirname;
+
+class TestRouter extends Router {
+  protected resolveStaticRootPath() {
+    return staticRoot;
+  }
+}
+
+describe("Router", () => {
+  it("blocks path traversal attacks", async () => {
+    const router = new TestRouter();
+    const res = {
+      statusCode: 200,
+      end: jest.fn()
+    };
+
+    await router.handleStaticFile("../index.ts", res as any, {} as any, 0);
+
+    expect(res.statusCode).toEqual(404);
+  });
+
+  it("serves files under static root", async () => {
+    const router = new TestRouter();
+    const res = {
+      statusCode: 200,
+      write: jest.fn(),
+      setHeader: jest.fn(),
+      end: jest.fn()
+    };
+    const req = {
+      url: ""
+    };
+
+    await router.handleStaticFile("router.test.ts", res as any, req as any, 0);
+
+    expect(res.statusCode).toEqual(200);
+  });
+});
+  6  src/main/app-updater.ts 
+@@ -4,16 +4,16 @@ import { isDevelopment, isTestEnv } from "../common/vars";
+import { delay } from "../common/utils";
+import { areArgsUpdateAvailableToBackchannel, AutoUpdateLogPrefix, broadcastMessage, onceCorrect, UpdateAvailableChannel, UpdateAvailableToBackchannel } from "../common/ipc";
+import { once } from "lodash";
+import { app, ipcMain } from "electron";
+import { ipcMain } from "electron";
+
+let installVersion: null | string = null;
+
+function handleAutoUpdateBackChannel(event: Electron.IpcMainEvent, ...[arg]: UpdateAvailableToBackchannel) {
+  if (arg.doUpdate) {
+    if (arg.now) {
+      logger.info(`${AutoUpdateLogPrefix}: User chose to update now`);
+      autoUpdater.quitAndInstall(true, true);
+      app.exit(); // this is needed for the installer not to fail on windows.
+      autoUpdater.on("update-downloaded", () => autoUpdater.quitAndInstall());
+      autoUpdater.downloadUpdate().catch(error => logger.error(`${AutoUpdateLogPrefix}: Failed to download or install update`, { error }));
+    } else {
+      logger.info(`${AutoUpdateLogPrefix}: User chose to update on quit`);
+      autoUpdater.autoInstallOnAppQuit = true;
+  2  src/main/lens-proxy.ts 
+@@ -28,7 +28,7 @@ export class LensProxy {
+  }
+
+  listen(port = this.port): this {
+    this.proxyServer = this.buildCustomProxy().listen(port);
+    this.proxyServer = this.buildCustomProxy().listen(port, "127.0.0.1");
+    logger.info(`[LENS-PROXY]: Proxy server has started at ${this.origin}`);
+
+    return this;
+  16  src/main/router.ts 
+@@ -40,10 +40,16 @@ export interface LensApiRequest<P = any> {
+
+export class Router {
+  protected router: any;
+  protected staticRootPath: string;
+
+  public constructor() {
+    this.router = new Call.Router();
+    this.addRoutes();
+    this.staticRootPath = this.resolveStaticRootPath();
+  }
+
+  protected resolveStaticRootPath() {
+    return path.resolve(__static);
+  }
+
+  public async route(cluster: Cluster, req: http.IncomingMessage, res: http.ServerResponse): Promise<boolean> {
+@@ -102,7 +108,15 @@ export class Router {
+  }
+
+  async handleStaticFile(filePath: string, res: http.ServerResponse, req: http.IncomingMessage, retryCount = 0) {
+    const asset = path.join(__static, filePath);
+    const asset = path.join(this.staticRootPath, filePath);
+    const normalizedFilePath = path.resolve(asset);
+
+    if (!normalizedFilePath.startsWith(this.staticRootPath)) {
+      res.statusCode = 404;
+      res.end();
+
+      return;
+    }
+
+    try {
+      const filename = path.basename(req.url);
+  1  src/renderer/components/ace-editor/ace-editor.tsx 
+@@ -32,6 +32,7 @@ const defaultProps: Partial<Props> = {
+  useWorker: false,
+  onBlur: noop,
+  onFocus: noop,
+  cursorPos: { row: 0, column: 0 },
+};
+
+@observer
+  2  src/renderer/components/layout/main-layout-header.tsx 
+@@ -25,7 +25,7 @@ export const MainLayoutHeader = observer(({ cluster, className }: Props) => {
+        !cluster.isManaged && (
+          <MenuItem onClick={actions.remove}>
+	       <span>Remove</span>
+	     </MenuItem> 
+	     </MenuItem>
+        )
+      }
+    </MenuActions>);
+  30  src/renderer/components/layout/sidebar-item.tsx 
+  84  src/renderer/components/layout/sidebar.tsx 
+@@ -51,25 +51,20 @@ export class Sidebar extends React.Component<Props> {
+    }
+
+    return Object.entries(crdStore.groups).map(([group, crds]) => {
+      const crdGroupSubMenu: React.ReactNode = crds.map((crd) => {
+        return (
+          <SidebarItem
+            key={crd.getResourceApiBase()}
+            id={`crd-resource:${crd.getResourceApiBase()}`}
+            url={crd.getResourceUrl()}
+            text={crd.getResourceTitle()}
+          />
+        );
+      });
+      const id = `crd-group:${group}`;
+      const crdGroupsPageUrl = crdURL({ query: { groups: group } });
+
+      return (
+        <SidebarItem
+          key={group}
+          text={group}
+          id={`crd-group:${group}`}
+          url={crdURL({ query: { groups: group } })}
+          subMenus={crdGroupSubMenu}
+        />
+        <SidebarItem key={id} id={id} text={group} url={crdGroupsPageUrl}>
+          {crds.map((crd) => (
+            <SidebarItem
+              key={crd.getResourceApiBase()}
+              id={`crd-resource:${crd.getResourceApiBase()}`}
+              url={crd.getResourceUrl()}
+              text={crd.getResourceTitle()}
+            />
+          ))}
+        </SidebarItem>
+      );
+    });
+  }
+@@ -147,8 +142,9 @@ export class Sidebar extends React.Component<Props> {
+          isActive={isActive}
+          text={menuItem.title}
+          icon={<menuItem.components.Icon/>}
+          subMenus={this.renderTreeFromTabRoutes(tabRoutes)}
+        />
+        >
+          {this.renderTreeFromTabRoutes(tabRoutes)}
+        </SidebarItem>
+      );
+    });
+  }
+@@ -175,88 +171,94 @@ export class Sidebar extends React.Component<Props> {
+        <div className={cssNames("sidebar-nav flex column box grow-fixed", { compact })}>
+          <SidebarItem
+            id="cluster"
+            text="Cluster"
+            isActive={isActiveRoute(clusterRoute)}
+            isHidden={!isAllowedResource("nodes")}
+            url={clusterURL()}
+            text="Cluster"
+            icon={<Icon svg="kube"/>}
+          />
+          <SidebarItem
+            id="nodes"
+            text="Nodes"
+            isActive={isActiveRoute(nodesRoute)}
+            isHidden={!isAllowedResource("nodes")}
+            url={nodesURL()}
+            text="Nodes"
+            icon={<Icon svg="nodes"/>}
+          />
+          <SidebarItem
+            id="workloads"
+            text="Workloads"
+            isActive={isActiveRoute(workloadsRoute)}
+            isHidden={Workloads.tabRoutes.length == 0}
+            url={workloadsURL({ query })}
+            subMenus={this.renderTreeFromTabRoutes(Workloads.tabRoutes)}
+            text="Workloads"
+            icon={<Icon svg="workloads"/>}
+          />
+          >
+            {this.renderTreeFromTabRoutes(Workloads.tabRoutes)}
+          </SidebarItem>
+          <SidebarItem
+            id="config"
+            text="Configuration"
+            isActive={isActiveRoute(configRoute)}
+            isHidden={Config.tabRoutes.length == 0}
+            url={configURL({ query })}
+            subMenus={this.renderTreeFromTabRoutes(Config.tabRoutes)}
+            text="Configuration"
+            icon={<Icon material="list"/>}
+          />
+          >
+            {this.renderTreeFromTabRoutes(Config.tabRoutes)}
+          </SidebarItem>
+          <SidebarItem
+            id="networks"
+            text="Network"
+            isActive={isActiveRoute(networkRoute)}
+            isHidden={Network.tabRoutes.length == 0}
+            url={networkURL({ query })}
+            subMenus={this.renderTreeFromTabRoutes(Network.tabRoutes)}
+            text="Network"
+            icon={<Icon material="device_hub"/>}
+          />
+          >
+            {this.renderTreeFromTabRoutes(Network.tabRoutes)}
+          </SidebarItem>
+          <SidebarItem
+            id="storage"
+            text="Storage"
+            isActive={isActiveRoute(storageRoute)}
+            isHidden={Storage.tabRoutes.length == 0}
+            url={storageURL({ query })}
+            subMenus={this.renderTreeFromTabRoutes(Storage.tabRoutes)}
+            icon={<Icon svg="storage"/>}
+            text="Storage"
+          />
+          >
+            {this.renderTreeFromTabRoutes(Storage.tabRoutes)}
+          </SidebarItem>
+          <SidebarItem
+            id="namespaces"
+            text="Namespaces"
+            isActive={isActiveRoute(namespacesRoute)}
+            isHidden={!isAllowedResource("namespaces")}
+            url={namespacesURL()}
+            icon={<Icon material="layers"/>}
+            text="Namespaces"
+          />
+          <SidebarItem
+            id="events"
+            text="Events"
+            isActive={isActiveRoute(eventRoute)}
+            isHidden={!isAllowedResource("events")}
+            url={eventsURL({ query })}
+            icon={<Icon material="access_time"/>}
+            text="Events"
+          />
+          <SidebarItem
+            id="apps"
+            text="Apps" // helm charts
+            isActive={isActiveRoute(appsRoute)}
+            url={appsURL({ query })}
+            subMenus={this.renderTreeFromTabRoutes(Apps.tabRoutes)}
+            icon={<Icon material="apps"/>}
+            text="Apps"
+          />
+          >
+            {this.renderTreeFromTabRoutes(Apps.tabRoutes)}
+          </SidebarItem>
+          <SidebarItem
+            id="users"
+            text="Access Control"
+            isActive={isActiveRoute(usersManagementRoute)}
+            url={usersManagementURL({ query })}
+            subMenus={this.renderTreeFromTabRoutes(UserManagement.tabRoutes)}
+            icon={<Icon material="security"/>}
+            text="Access Control"
+          />
+          >
+            {this.renderTreeFromTabRoutes(UserManagement.tabRoutes)}
+          </SidebarItem>
+          <SidebarItem
+            id="custom-resources"
+            text="Custom Resources"
+  21  static/RELEASE_NOTES.md 
+@@ -2,7 +2,7 @@
+
+Here you can find description of changes we've built into each release. While we try our best to make each upgrade automatic and as smooth as possible, there may be some cases where you might need to do something to ensure the application works smoothly. So please read through the release highlights!
+
+## 4.2.0-rc.2 (current version)
+## 4.2.0 (current version)
+
+- Add lens:// protocol handling with a routing mechanism
+- Add common app routes to the protocol renderer router from the documentation
+@@ -33,6 +33,21 @@ Here you can find description of changes we've built into each release. While we
+- Fix: Closing workspace menu after clicking on iframe
+- Fix: extension global pages are never able to be visible
+- Fix: recreate proxy kubeconfig if it is deleted
+- Fix: Proxy should listen only on loopback device
+- Fix: Block global path traversal in router
+- Fix: Set initial cursor position for the editor to beginning
+- Fix: Highlight sidebar's active section
+- Fix: internal proxy listening on all network interfaces
+- Fix: extension command palette loading
+- Fix: Lens not clearing other KUBECONFIG env vars
+
+## 4.1.5
+
+**Upgrade note:** Where have all my pods gone? Namespaced Kubernetes resources are now initially shown only for the "default" namespace. Use the namespaces selector to add more.
+
+- Fix internal proxy listening on all network interfaces
+- Fix extension command palette loading
+- Fix Lens not clearing other KUBECONFIG env vars
+
+## 4.1.4
+
+@@ -57,8 +72,6 @@ Here you can find description of changes we've built into each release. While we
+
+## 4.1.2
+
+**Upgrade note:** Where have all my pods gone? Namespaced Kubernetes resources are now initially shown only for the "default" namespace. Use the namespaces selector to add more.
+
+- Fix an issue where a cluster gets stuck on "Connecting ..." phase
+- Fix an issue with auto-update
+
+@@ -70,8 +83,6 @@ Here you can find description of changes we've built into each release. While we
+
+## 4.1.0
+
+**Upgrade note:** Where have all my pods gone? Namespaced Kubernetes resources are now initially shown only for the "default" namespace. Use the namespaces selector to add more.
+
+- Change: list views default to a namespace (instead of listing resources from all namespaces)
+- Command palette
+- Generic logs view with Pod selector
+ ProTip! Use n and p to navigate between commits in a pull request.
+© 2021 GitHub, Inc.
+Terms
+Privacy
+Security
+Status
+Docs
+Contact GitHub
+Pricing
+API
+Training
+Blog
+About
+Copied!
